@@ -1,8 +1,14 @@
 {
   "name": "solutiontech-scraper",
-  "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "scrape:one": "node scrape-one.mjs",
+    "scrape:collection": "node crawl-collection.mjs"
+  },
   "dependencies": {
-    "playwright": "1.56.1"
+    "dotenv": "^16.4.5",
+    "node-fetch": "^3.3.2",
+    "p-limit": "^5.0.0",
+    "playwright": "^1.56.1"
   }
 }
