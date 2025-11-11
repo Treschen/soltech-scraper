@@ -24,21 +24,28 @@ async function login(page) {
   await page.locator('button:has-text("I Accept")').first().click({ timeout: 2000 }).catch(() => {});
   await page.locator('[data-accept-cookies], .accept-cookies').first().click({ timeout: 2000 }).catch(() => {});
 
-  // Select the first login form on the page
+  // Scope to the login form and fill
   const form = page.locator('form[action*="/account/login"]').first();
-
-  // Fill email/password using scoped selectors (avoid strict-mode collisions)
   await form.locator('#customer_email, input[name="customer[email]"]').first().fill(DEALER_EMAIL, { timeout: 15000 });
   await form.locator('#customer_password, input[name="customer[password]"]').first().fill(DEALER_PASSWORD, { timeout: 15000 });
 
-  // Click the submit inside the same form
+  // Submit (XHR likely, not a full navigation)
   const submit = form.locator('button[type="submit"], button[name="commit"], input[type="submit"]').first();
+  await submit.click();
 
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: 'networkidle', timeout: 20000 }),
-    submit.click()
+  // Wait for any success signal (no hard navigation)
+  const loggedIn = await Promise.race([
+    page.waitForSelector('a[href*="/account/logout"], form[action*="/account/logout"], .customer-logout', { timeout: 10000 }).then(() => true).catch(() => false),
+    page.waitForURL(u => !u.includes('/account/login'), { timeout: 10000 }).then(() => true).catch(() => false),
+    page.waitForResponse(r => r.url().includes('/account') && r.status() === 200, { timeout: 10000 }).then(() => true).catch(() => false),
   ]);
+
+  // Even if we didn’t detect a signal, proceed; the product fetch will prove auth
+  if (!loggedIn) {
+    await page.waitForTimeout(600);
+  }
 }
+
 
 
 async function fetchProductJsonInSession(page, handle) {
