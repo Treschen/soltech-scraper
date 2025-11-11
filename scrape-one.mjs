@@ -159,6 +159,14 @@ async function scrapeOne() {
     }
   }
 
+// after you build `result.variants`
+for (const v of result.variants) {
+  const s = String(v.price || '').trim();
+  const asNumber = /^\d+$/.test(s) ? Number(s) / 100 : Number(s.replace(/[^0-9.]/g,''));
+  v.price_rands = Number.isFinite(asNumber) ? asNumber.toFixed(2) : '';
+}
+
+
   await browser.close();
 
   if (N8N_WEBHOOK_URL) {
