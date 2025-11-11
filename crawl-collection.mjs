@@ -66,6 +66,7 @@ async function main() {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120000 });
 
     const links = (await getProductLinksOnPage(page)).filter(href => !seenLinks.has(href));
+    console.log(`  handles on page (unique): ${links.length}`);
     links.forEach(href => seenLinks.add(href));
     console.log(`  found ${links.length} new product links`);
 
