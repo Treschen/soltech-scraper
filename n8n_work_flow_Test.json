@@ -1,0 +1,39 @@
+{
+  "name": "Solutiontech Ingest (Production)",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "solutiontech_ingest",
+        "httpMethod": "POST",
+        "responseMode": "responseNode"
+      },
+      "id": "Webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [ 300, 300 ]
+    },
+    {
+      "parameters": {
+        "statusCode": 200,
+        "responseBody": "={{ { ok: true, items: $items().length } }}"
+      },
+      "id": "Respond to Webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [ 600, 300 ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          { "node": "Respond to Webhook", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false
+}
