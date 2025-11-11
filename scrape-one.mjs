@@ -18,15 +18,28 @@ const extractHandle = url => (url.match(/\/products\/([^/?#]+)/i) || [])[1] || "
 
 async function login(page) {
   await page.goto(`${SUPPLIER_BASE}/account/login`, { waitUntil: 'load' });
-  await page.locator('input[name="customer[email]"]').fill(DEALER_EMAIL);
-  await page.locator('input[name="customer[password]"]').fill(DEALER_PASSWORD);
-  const loginBtn = page.locator('button[name="commit"], button[type="submit"], input[type="submit"]');
+
+  // Dismiss cookie banner if present (non-fatal)
+  await page.locator('button:has-text("Accept")').first().click({ timeout: 2000 }).catch(() => {});
+  await page.locator('button:has-text("I Accept")').first().click({ timeout: 2000 }).catch(() => {});
+  await page.locator('[data-accept-cookies], .accept-cookies').first().click({ timeout: 2000 }).catch(() => {});
+
+  // Select the first login form on the page
+  const form = page.locator('form[action*="/account/login"]').first();
+
+  // Fill email/password using scoped selectors (avoid strict-mode collisions)
+  await form.locator('#customer_email, input[name="customer[email]"]').first().fill(DEALER_EMAIL, { timeout: 15000 });
+  await form.locator('#customer_password, input[name="customer[password]"]').first().fill(DEALER_PASSWORD, { timeout: 15000 });
+
+  // Click the submit inside the same form
+  const submit = form.locator('button[type="submit"], button[name="commit"], input[type="submit"]').first();
+
   await Promise.all([
-    page.waitForNavigation({ waitUntil: 'networkidle' }),
-    loginBtn.first().click()
+    page.waitForNavigation({ waitUntil: 'networkidle', timeout: 20000 }),
+    submit.click()
   ]);
-  await wait(400);
 }
+
 
 async function fetchProductJsonInSession(page, handle) {
   try {
