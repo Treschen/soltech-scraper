@@ -16,6 +16,7 @@ if (!SUPPLIER_BASE || !DEALER_EMAIL || !DEALER_PASSWORD || !PRODUCT_URL) {
 const wait = ms => new Promise(r => setTimeout(r, ms));
 const extractHandle = url => (url.match(/\/products\/([^/?#]+)/i) || [])[1] || "";
 
+// ------- LOGIN (XHR-based, no full navigation expected) -------
 async function login(page) {
   await page.goto(`${SUPPLIER_BASE}/account/login`, { waitUntil: 'load' });
 
@@ -45,8 +46,6 @@ async function login(page) {
     await page.waitForTimeout(600);
   }
 }
-
-
 
 async function fetchProductJsonInSession(page, handle) {
   try {
@@ -159,13 +158,12 @@ async function scrapeOne() {
     }
   }
 
-// after you build `result.variants`
-for (const v of result.variants) {
-  const s = String(v.price || '').trim();
-  const asNumber = /^\d+$/.test(s) ? Number(s) / 100 : Number(s.replace(/[^0-9.]/g,''));
-  v.price_rands = Number.isFinite(asNumber) ? asNumber.toFixed(2) : '';
-}
-
+  // after you build `result.variants`
+  for (const v of result.variants) {
+    const s = String(v.price || '').trim();
+    const asNumber = /^\d+$/.test(s) ? Number(s) / 100 : Number(s.replace(/[^0-9.]/g,''));
+    v.price_rands = Number.isFinite(asNumber) ? asNumber.toFixed(2) : '';
+  }
 
   await browser.close();
 
