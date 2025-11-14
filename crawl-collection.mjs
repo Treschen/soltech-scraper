@@ -81,9 +81,9 @@ async function main() {
 
     if (items.length) {
       const payload = {
-        source: "solutiontech",
+        source: "SOURCE",
         batchId: `collection-${Date.now()}-p${pages}`,
-        vendor: items[0]?.vendor || "Epson",
+        vendor: items[0]?.vendor || DEFAULT_VENDOR,
         items,
       };
       console.log(`  → Posting batch of ${items.length} items to n8n`);
