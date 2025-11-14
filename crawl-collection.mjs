@@ -18,8 +18,6 @@ const {
   N8N_WEBHOOK_URL,
   MAX_PAGES = "10",
   CONCURRENCY = "4",
-  //SOURCE = "solutiontech",      // default if env not set
-  //DEFAULT_VENDOR = "Epson",     // default if env not set
 } = process.env;
 
 if (!COLLECTION_URL) throw new Error("Missing env: COLLECTION_URL");
@@ -28,8 +26,12 @@ if (!N8N_WEBHOOK_URL) throw new Error("Missing env: N8N_WEBHOOK_URL");
 const maxPages = parseInt(MAX_PAGES, 10);
 const limit = pLimit(parseInt(CONCURRENCY, 10));
 
+// read once at module scope so we use the same values everywhere
+const SOURCE_ENV = process.env.SOURCE || "solutiontech";
+const DEFAULT_VENDOR_ENV = process.env.DEFAULT_VENDOR || "Epson";
+
 async function main() {
-  console.log(`[init] SOURCE=${SOURCE}, DEFAULT_VENDOR=${DEFAULT_VENDOR}`);
+  console.log(`[init] SOURCE=${SOURCE_ENV}, DEFAULT_VENDOR=${DEFAULT_VENDOR_ENV}`);
   console.log(`[init] BASE=${SUPPLIER_BASE}, COLLECTION_URL=${COLLECTION_URL}`);
 
   const browser = await chromium.launch({ headless: true });
@@ -94,26 +96,25 @@ async function main() {
     );
 
     if (items.length) {
-      const sourceEnv = process.env.SOURCE || "solutiontech";
-      const defaultVendorEnv = process.env.DEFAULT_VENDOR || "Epson";
-
       const payload = {
-        source: sourceEnv,
+        source: SOURCE_ENV,
         batchId: `collection-${Date.now()}-p${pages}`,
-        vendor: items[0]?.vendor || defaultVendorEnv,
+        vendor: items[0]?.vendor || DEFAULT_VENDOR_ENV,
         items,
       };
 
       console.log(
-        `  → Posting batch of ${items.length} items to n8n (source=${sourceEnv}, vendor=${payload.vendor})`
+        `  → Posting batch of ${items.length} items to n8n (source=${payload.source}, vendor=${payload.vendor})`
       );
 
-      await postJsonWithRetry(N8N_WEBHOOK_URL, {
-        ...payload,
-      }, {
-        retries: 5,
-        baseDelayMs: 500,
-      });
+      await postJsonWithRetry(
+        N8N_WEBHOOK_URL,
+        payload,
+        {
+          retries: 5,
+          baseDelayMs: 500,
+        }
+      );
 
       totalPushed += items.length;
     } else {
