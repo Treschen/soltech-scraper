@@ -1,4 +1,3 @@
-
 import "dotenv/config";
 import { chromium } from "playwright";
 import pLimit from "p-limit";
@@ -11,16 +10,28 @@ const {
   SUPPLIER_BASE,
   DEALER_EMAIL,
   DEALER_PASSWORD,
-  COLLECTION_URL,
+  COLLECTION_URL,      // legacy single URL
+  COLLECTION_URLS,     // NEW: comma-separated list of URLs
   N8N_WEBHOOK_URL,
   MAX_PAGES = "10",
   CONCURRENCY = "4",
-  BATCH_SIZE = "50",         // NEW: how many items per webhook POST
-  DRY_RUN = "false",         // NEW: if "true", skip POST and just log
+  BATCH_SIZE = "50",         // how many items per webhook POST
+  DRY_RUN = "false",         // if "true", skip POST and just log
 } = process.env;
 
-if (!COLLECTION_URL) throw new Error("Missing env: COLLECTION_URL");
-if (!N8N_WEBHOOK_URL && DRY_RUN !== "true") throw new Error("Missing env: N8N_WEBHOOK_URL");
+// Build the list of start URLs (supports COLLECTION_URLS or single COLLECTION_URL)
+const startUrls = (COLLECTION_URLS || COLLECTION_URL || "")
+  .split(",")
+  .map(u => u.trim())
+  .filter(Boolean);
+
+if (!startUrls.length) {
+  throw new Error("Missing env: COLLECTION_URL or COLLECTION_URLS");
+}
+
+if (!N8N_WEBHOOK_URL && DRY_RUN !== "true") {
+  throw new Error("Missing env: N8N_WEBHOOK_URL");
+}
 
 const maxPages = parseInt(MAX_PAGES, 10);
 const limit = pLimit(parseInt(CONCURRENCY, 10));
@@ -49,58 +60,77 @@ function chunk(arr, n) {
 }
 
 async function main() {
+  console.log(`[init] startUrls (${startUrls.length}):`);
+  startUrls.forEach(u => console.log(`  - ${u}`));
+
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
 
-  await loginIfNeeded(page, { base: SUPPLIER_BASE, email: DEALER_EMAIL, password: DEALER_PASSWORD });
-
-  let url = COLLECTION_URL;
-  let pages = 0;
+  await loginIfNeeded(page, {
+    base: SUPPLIER_BASE,
+    email: DEALER_EMAIL,
+    password: DEALER_PASSWORD,
+  });
 
   const seenLinks = new Set();
   const collected = [];   // all products gathered this run
+  let totalPages = 0;
 
-  while (url && pages < maxPages) {
-    pages++;
-    console.log(`[collection] page ${pages}: ${url}`);
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120000 });
+  // Loop over each start URL (collection)
+  for (let idx = 0; idx < startUrls.length; idx++) {
+    const startUrl = startUrls[idx];
+    console.log(`\n[set ${idx + 1}/${startUrls.length}] starting at ${startUrl}`);
 
-    const links = (await getProductLinksOnPage(page)).filter(href => !seenLinks.has(href));
-    console.log(`  handles on page (unique): ${links.length}`);
-    links.forEach(href => seenLinks.add(href));
-    console.log(`  found ${links.length} new product links`);
+    let url = startUrl;
+    let pages = 0;
 
-    // Scrape products concurrently (no posting here)
-    await Promise.all(
-      links.map(href =>
-        limit(async () => {
-          const p = await ctx.newPage();
-          try {
-            await p.goto(href, { waitUntil: "domcontentloaded", timeout: 120000 });
-            const prod = await extractProduct(p);
-            collected.push({
-              source: "solutiontech",
-              crawledAt: new Date().toISOString(),
-              ...prod,
-            });
-            console.log(`  ✔ scraped: ${prod.title}`);
-          } catch (e) {
-            console.error(`  ✖ scrape failed ${href}:`, e.message);
-            await p.screenshot({ path: `./failed_${Date.now()}.png`, fullPage: true }).catch(() => {});
-          } finally {
-            await p.close();
-          }
-        })
-      )
-    );
+    while (url && pages < maxPages) {
+      pages++;
+      totalPages++;
+      console.log(`[collection ${idx + 1}] page ${pages}: ${url}`);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120000 });
 
-    url = await getNextPageUrl(page);
+      const links = (await getProductLinksOnPage(page)).filter(href => !seenLinks.has(href));
+      console.log(`  handles on page (unique): ${links.length}`);
+      links.forEach(href => seenLinks.add(href));
+      console.log(`  found ${links.length} new product links`);
+
+      // Scrape products concurrently (no posting here)
+      await Promise.all(
+        links.map(href =>
+          limit(async () => {
+            const p = await ctx.newPage();
+            try {
+              await p.goto(href, { waitUntil: "domcontentloaded", timeout: 120000 });
+              const prod = await extractProduct(p);
+              collected.push({
+                source: "solutiontech",
+                crawledAt: new Date().toISOString(),
+                ...prod,
+              });
+              console.log(`  ✔ scraped: ${prod.title}`);
+            } catch (e) {
+              console.error(`  ✖ scrape failed ${href}:`, e.message);
+              await p
+                .screenshot({ path: `./failed_${Date.now()}.png`, fullPage: true })
+                .catch(() => {});
+            } finally {
+              await p.close();
+            }
+          })
+        )
+      );
+
+      url = await getNextPageUrl(page);
+    }
+
+    console.log(`[set ${idx + 1}] finished after ${pages} page(s).`);
   }
 
   // Dedupe and send in batches
   const deduped = dedupeByKey(collected);
-  console.log(`Collected ${collected.length} items (${deduped.length} after dedupe).`);
+  console.log(`\nCollected ${collected.length} items (${deduped.length} after dedupe) across ${totalPages} page(s).`);
 
   if (DRY_RUN === "true") {
     console.log(`[DRY_RUN] Would POST ${deduped.length} items in batches of ${batchSize} to ${N8N_WEBHOOK_URL || "(no URL)"}`);
@@ -117,13 +147,25 @@ async function main() {
         count: part.length,
         items: part,
       };
-      console.log(`Posting batch ${i + 1}/${batches.length} (${part.length} items) to N8N: ${N8N_WEBHOOK_URL}`);
-      await postJsonWithRetry(N8N_WEBHOOK_URL, body, { retries: 5, baseDelayMs: 500 });
+      console.log(
+        `Posting batch ${i + 1}/${batches.length} (${part.length} items) to N8N: ${N8N_WEBHOOK_URL}`
+      );
+      await postJsonWithRetry(N8N_WEBHOOK_URL, body, {
+        retries: 5,
+        baseDelayMs: 500,
+      });
     }
   }
 
-  console.log(`Done. Pages: ${pages}, Products scraped: ${collected.length}, Posted: ${DRY_RUN === "true" ? 0 : deduped.length}`);
+  console.log(
+    `Done. Collections: ${startUrls.length}, Pages: ${totalPages}, Products scraped: ${collected.length}, Posted: ${
+      DRY_RUN === "true" ? 0 : deduped.length
+    }`
+  );
   await browser.close();
 }
 
-main().catch(e => { console.error("Fatal:", e); process.exit(2); });
+main().catch(e => {
+  console.error("Fatal:", e);
+  process.exit(2);
+});
