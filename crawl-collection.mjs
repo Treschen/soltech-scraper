@@ -14,12 +14,11 @@ const {
   COLLECTION_URLS,     // NEW: comma-separated list of URLs
   N8N_WEBHOOK_URL,
   MAX_PAGES = "10",
-  CONCURRENCY = "4",
-  BATCH_SIZE = "50",         // how many items per webhook POST
-  DRY_RUN = "false",         // if "true", skip POST and just log
+  CONCURRENCY = "5",
+  BATCH_SIZE = "50",
+  DRY_RUN = "false",
 } = process.env;
 
-// Build the list of start URLs (supports COLLECTION_URLS or single COLLECTION_URL)
 const startUrls = (COLLECTION_URLS || COLLECTION_URL || "")
   .split(",")
   .map(u => u.trim())
@@ -59,6 +58,56 @@ function chunk(arr, n) {
   return out;
 }
 
+async function sendBatchesForCollection(items, collectionIndex, collectionUrl) {
+  if (!items.length) {
+    console.log(
+      `[collection ${collectionIndex + 1}] no items to send, skipping webhook.`
+    );
+    return;
+  }
+
+  const deduped = dedupeByKey(items);
+  console.log(
+    `\n[collection ${collectionIndex + 1}] preparing to send ${deduped.length} items (${items.length} raw) for ${collectionUrl}`
+  );
+
+  if (DRY_RUN === "true") {
+    console.log(
+      `[DRY_RUN] Would POST ${deduped.length} items in batches of ${batchSize} for collection ${
+        collectionIndex + 1
+      } to ${N8N_WEBHOOK_URL || "(no URL)"}`
+    );
+    return;
+  }
+
+  const batches = chunk(deduped, batchSize);
+  const batchId = `${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 7)}-c${collectionIndex + 1}`;
+
+  for (let i = 0; i < batches.length; i++) {
+    const part = batches[i];
+    const body = {
+      batchId,
+      collectionIndex,
+      collectionUrl,
+      index: i,
+      totalBatches: batches.length,
+      count: part.length,
+      items: part,
+    };
+    console.log(
+      `[collection ${collectionIndex + 1}] posting batch ${i + 1}/${
+        batches.length
+      } (${part.length} items) to N8N: ${N8N_WEBHOOK_URL}`
+    );
+    await postJsonWithRetry(N8N_WEBHOOK_URL, body, {
+      retries: 5,
+      baseDelayMs: 500,
+    });
+  }
+}
+
 async function main() {
   console.log(`[init] startUrls (${startUrls.length}):`);
   startUrls.forEach(u => console.log(`  - ${u}`));
@@ -73,17 +122,17 @@ async function main() {
     password: DEALER_PASSWORD,
   });
 
-  const seenLinks = new Set();
-  const collected = [];   // all products gathered this run
+  const globalSeenKeys = new Set(); // avoid dupes across collections
   let totalPages = 0;
+  let totalItems = 0;
 
-  // Loop over each start URL (collection)
   for (let idx = 0; idx < startUrls.length; idx++) {
     const startUrl = startUrls[idx];
     console.log(`\n[set ${idx + 1}/${startUrls.length}] starting at ${startUrl}`);
 
     let url = startUrl;
     let pages = 0;
+    const collectedForSet = []; // items for this collection only
 
     while (url && pages < maxPages) {
       pages++;
@@ -91,29 +140,45 @@ async function main() {
       console.log(`[collection ${idx + 1}] page ${pages}: ${url}`);
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120000 });
 
-      const links = (await getProductLinksOnPage(page)).filter(href => !seenLinks.has(href));
+      const links = (await getProductLinksOnPage(page)).filter(href => !!href);
       console.log(`  handles on page (unique): ${links.length}`);
-      links.forEach(href => seenLinks.add(href));
       console.log(`  found ${links.length} new product links`);
 
-      // Scrape products concurrently (no posting here)
+      // Scrape products concurrently for this collection
       await Promise.all(
         links.map(href =>
           limit(async () => {
             const p = await ctx.newPage();
             try {
-              await p.goto(href, { waitUntil: "domcontentloaded", timeout: 120000 });
+              await p.goto(href, {
+                waitUntil: "domcontentloaded",
+                timeout: 120000,
+              });
               const prod = await extractProduct(p);
-              collected.push({
+              const full = {
                 source: "solutiontech",
                 crawledAt: new Date().toISOString(),
+                collectionIndex: idx,
+                collectionUrl: startUrl,
                 ...prod,
-              });
-              console.log(`  ✔ scraped: ${prod.title}`);
+              };
+
+              const key = makeKey(full);
+              if (globalSeenKeys.has(key)) {
+                console.log(`  ◦ duplicate key, skipping: ${key}`);
+              } else {
+                globalSeenKeys.add(key);
+                collectedForSet.push(full);
+                totalItems++;
+                console.log(`  ✔ scraped: ${prod.title}`);
+              }
             } catch (e) {
               console.error(`  ✖ scrape failed ${href}:`, e.message);
               await p
-                .screenshot({ path: `./failed_${Date.now()}.png`, fullPage: true })
+                .screenshot({
+                  path: `./failed_${Date.now()}.png`,
+                  fullPage: true,
+                })
                 .catch(() => {});
             } finally {
               await p.close();
@@ -126,41 +191,13 @@ async function main() {
     }
 
     console.log(`[set ${idx + 1}] finished after ${pages} page(s).`);
-  }
 
-  // Dedupe and send in batches
-  const deduped = dedupeByKey(collected);
-  console.log(`\nCollected ${collected.length} items (${deduped.length} after dedupe) across ${totalPages} page(s).`);
-
-  if (DRY_RUN === "true") {
-    console.log(`[DRY_RUN] Would POST ${deduped.length} items in batches of ${batchSize} to ${N8N_WEBHOOK_URL || "(no URL)"}`);
-  } else {
-    const batches = chunk(deduped, batchSize);
-    const batchId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-
-    for (let i = 0; i < batches.length; i++) {
-      const part = batches[i];
-      const body = {
-        batchId,
-        index: i,
-        totalBatches: batches.length,
-        count: part.length,
-        items: part,
-      };
-      console.log(
-        `Posting batch ${i + 1}/${batches.length} (${part.length} items) to N8N: ${N8N_WEBHOOK_URL}`
-      );
-      await postJsonWithRetry(N8N_WEBHOOK_URL, body, {
-        retries: 5,
-        baseDelayMs: 500,
-      });
-    }
+    // send ONLY this collection's items as its own webhook run
+    await sendBatchesForCollection(collectedForSet, idx, startUrl);
   }
 
   console.log(
-    `Done. Collections: ${startUrls.length}, Pages: ${totalPages}, Products scraped: ${collected.length}, Posted: ${
-      DRY_RUN === "true" ? 0 : deduped.length
-    }`
+    `Done. Collections: ${startUrls.length}, Pages: ${totalPages}, Products scraped (unique keys): ${totalItems}`
   );
   await browser.close();
 }
