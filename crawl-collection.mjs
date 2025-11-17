@@ -58,6 +58,35 @@ function chunk(arr, n) {
   return out;
 }
 
+// Normalise vendor for Solution Technologies (Epson vs JK etc.)
+function normaliseVendorForSolutiontech(prod) {
+  const title = prod.title || "";
+  const sku = prod.sku || "";
+  let vendor = (prod.vendor || "").trim();
+
+  const t = title.toLowerCase();
+  const skuLow = sku.toLowerCase();
+
+  const isJK =
+    skuLow.startsWith("jk") ||
+    t.startsWith("jk ");
+
+  const isEpson =
+    t.includes("epson") ||
+    skuLow.startsWith("eh") ||
+    skuLow.startsWith("eb") ||
+    skuLow.startsWith("ls");
+
+  // Strong patterns win over whatever the page/extractor said
+  if (isJK) {
+    vendor = "JK";
+  } else if (isEpson) {
+    vendor = "Epson";
+  }
+
+  return { ...prod, vendor };
+}
+
 async function sendBatchesForCollection(items, collectionIndex, collectionUrl) {
   if (!items.length) {
     console.log(
@@ -81,18 +110,14 @@ async function sendBatchesForCollection(items, collectionIndex, collectionUrl) {
   }
 
   const batches = chunk(deduped, batchSize);
-  const batchId = `${Date.now().toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2, 7)}-c${collectionIndex + 1}`;
-
   for (let i = 0; i < batches.length; i++) {
     const part = batches[i];
     const body = {
-      batchId,
+      source: "solutiontech",
       collectionIndex,
       collectionUrl,
-      index: i,
-      totalBatches: batches.length,
+      batchIndex: i,
+      batchCount: batches.length,
       count: part.length,
       items: part,
     };
@@ -122,9 +147,11 @@ async function main() {
     password: DEALER_PASSWORD,
   });
 
-  const globalSeenKeys = new Set(); // avoid dupes across collections
   let totalPages = 0;
   let totalItems = 0;
+
+  // track global uniqueness across ALL collections
+  const globalSeenKeys = new Set();
 
   for (let idx = 0; idx < startUrls.length; idx++) {
     const startUrl = startUrls[idx];
@@ -138,11 +165,16 @@ async function main() {
       pages++;
       totalPages++;
       console.log(`[collection ${idx + 1}] page ${pages}: ${url}`);
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120000 });
 
-      const links = (await getProductLinksOnPage(page)).filter(href => !!href);
-      console.log(`  handles on page (unique): ${links.length}`);
-      console.log(`  found ${links.length} new product links`);
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 120000,
+      });
+
+      const links = await getProductLinksOnPage(page);
+      console.log(
+        `[collection ${idx + 1}] page ${pages}: found ${links.length} links`
+      );
 
       // Scrape products concurrently for this collection
       await Promise.all(
@@ -154,7 +186,8 @@ async function main() {
                 waitUntil: "domcontentloaded",
                 timeout: 120000,
               });
-              const prod = await extractProduct(p);
+              const prodRaw = await extractProduct(p);
+              const prod = normaliseVendorForSolutiontech(prodRaw);
               const full = {
                 source: "solutiontech",
                 crawledAt: new Date().toISOString(),
@@ -176,7 +209,7 @@ async function main() {
               console.error(`  ✖ scrape failed ${href}:`, e.message);
               await p
                 .screenshot({
-                  path: `./failed_${Date.now()}.png`,
+                  path: `error-${Date.now()}.png`,
                   fullPage: true,
                 })
                 .catch(() => {});
@@ -187,10 +220,19 @@ async function main() {
         )
       );
 
-      url = await getNextPageUrl(page);
+      // next page for this collection
+      const nextUrl = await getNextPageUrl(page);
+      if (!nextUrl) {
+        console.log(
+          `[collection ${idx + 1}] no further page link found; stopping pagination.`
+        );
+      }
+      url = nextUrl;
     }
 
-    console.log(`[set ${idx + 1}] finished after ${pages} page(s).`);
+    console.log(
+      `[collection ${idx + 1}] finished pagination. Pages: ${pages}, collected items: ${collectedForSet.length}`
+    );
 
     // send ONLY this collection's items as its own webhook run
     await sendBatchesForCollection(collectedForSet, idx, startUrl);
