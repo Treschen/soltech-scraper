@@ -148,7 +148,7 @@ async function sendBatchesForCollection(items, collectionIndex, collectionUrl) {
 
 // ---------- collection loading helpers ----------
 
-// For “Items per page: 24” style controls – set to max value
+// Try to bump “Items per page” dropdown to its max value
 async function setItemsPerPageToMax(page) {
   try {
     const result = await page.evaluate(() => {
@@ -158,18 +158,15 @@ async function setItemsPerPageToMax(page) {
       for (const sel of selects) {
         let labelText = "";
 
-        // direct label[for=id]
         if (sel.id) {
           const lbl = document.querySelector(`label[for="${sel.id}"]`);
           if (lbl) labelText += " " + (lbl.textContent || "");
         }
 
-        // parent text often contains the label (e.g. "Items per page 24 ▼")
         if (sel.parentElement) {
           labelText += " " + (sel.parentElement.textContent || "");
         }
 
-        // previous sibling might be a label span
         if (sel.previousElementSibling) {
           labelText += " " + (sel.previousElementSibling.textContent || "");
         }
@@ -187,7 +184,6 @@ async function setItemsPerPageToMax(page) {
       const options = Array.from(target.options || []);
       if (!options.length) return { found: false };
 
-      // take the last option as "max"
       const last = options[options.length - 1];
       target.value = last.value;
       target.dispatchEvent(new Event("change", { bubbles: true }));
@@ -208,7 +204,6 @@ async function setItemsPerPageToMax(page) {
       `  [items-per-page] set to max option value=${result.value} (${result.text.trim()})`
     );
 
-    // wait for Ajax reload of product grid
     await page.waitForLoadState("networkidle").catch(() => {});
     await page.waitForTimeout(1500);
   } catch (err) {
@@ -216,6 +211,49 @@ async function setItemsPerPageToMax(page) {
       "  [items-per-page] failed to change items-per-page dropdown:",
       err.message
     );
+  }
+}
+
+// Drive RapidSearch / resultpage.js to load all additional items if possible
+async function rapidSearchLoadAll(page) {
+  try {
+    // 1) Click any visible “load more” style button a few times
+    for (let i = 0; i < 10; i++) {
+      const loadMore = await page.$(
+        'button[class*="load"],a[class*="load"],.rs-load-more'
+      );
+      if (!loadMore) break;
+
+      console.log(`  [rapidsearch] Clicking Load More (${i + 1})`);
+      await loadMore.click().catch(() => {});
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await page.waitForTimeout(1500);
+    }
+
+    // 2) Try JS API if the app exposes something usable
+    await page.evaluate(async () => {
+      const rs = window.RapidSearch || window.RapidSearchResult || null;
+      if (!rs) return;
+
+      // very defensive: only call if clearly a function
+      const fn =
+        rs.loadMore ||
+        (rs.resultPage && rs.resultPage.loadMore) ||
+        null;
+
+      if (typeof fn === "function") {
+        for (let i = 0; i < 10; i++) {
+          try {
+            await fn.call(rs);
+          } catch (e) {
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+      }
+    });
+  } catch (err) {
+    console.log("  [rapidsearch] error:", err.message);
   }
 }
 
@@ -291,10 +329,13 @@ async function main() {
         timeout: 120000,
       });
 
-      // First, try to bump "Items per page" to max (Dtech & similar)
+      // Dtech & similar: try bumping items-per-page
       await setItemsPerPageToMax(page);
 
-      // Then, scroll in case any collection uses infinite scroll
+      // RapidSearch resultpage.js integration: try to load all extra items
+      await rapidSearchLoadAll(page);
+
+      // Extra safety: scroll in case anything is tied to scroll events
       await autoScrollCollection(page);
 
       const links = await getProductLinksOnPage(page);
@@ -348,7 +389,7 @@ async function main() {
         )
       );
 
-      // next page for this collection (for classic ?page=2 pagination)
+      // next page for classic ?page=2 style pagination
       const nextUrl = await getNextPageUrl(page);
       if (!nextUrl) {
         console.log(
@@ -362,7 +403,6 @@ async function main() {
       `[collection ${idx + 1}] finished pagination. Pages: ${pages}, collected items: ${collectedForSet.length}`
     );
 
-    // send ONLY this collection's items as its own webhook run
     await sendBatchesForCollection(collectedForSet, idx, startUrl);
   }
 
