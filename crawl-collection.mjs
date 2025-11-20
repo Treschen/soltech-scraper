@@ -1,9 +1,13 @@
+// crawl-collection.mjs
 import "dotenv/config";
 import { chromium } from "playwright";
 import pLimit from "p-limit";
 import { loginIfNeeded } from "./lib/login.mjs";
 import { extractProduct } from "./lib/extract-product.mjs";
-import { getProductLinksOnPage, getNextPageUrl } from "./lib/pagination.mjs";
+import {
+  getProductLinksOnPage,
+  getNextPageUrl,
+} from "./lib/pagination.mjs";
 import { postJsonWithRetry } from "./lib/fetch-retry.mjs";
 
 const {
@@ -11,7 +15,7 @@ const {
   DEALER_EMAIL,
   DEALER_PASSWORD,
   COLLECTION_URL,      // legacy single URL
-  COLLECTION_URLS,     // NEW: comma-separated list of URLs
+  COLLECTION_URLS,     // comma-separated list of URLs
   N8N_WEBHOOK_URL,
   MAX_PAGES = "10",
   CONCURRENCY = "5",
@@ -21,7 +25,7 @@ const {
 
 const startUrls = (COLLECTION_URLS || COLLECTION_URL || "")
   .split(",")
-  .map(u => u.trim())
+  .map((u) => u.trim())
   .filter(Boolean);
 
 if (!startUrls.length) {
@@ -36,21 +40,23 @@ const maxPages = parseInt(MAX_PAGES, 10);
 const limit = pLimit(parseInt(CONCURRENCY, 10));
 const batchSize = Math.max(1, parseInt(BATCH_SIZE, 10) || 50);
 
-// util: make a stable key (sku preferred, else handle)
+// ---------- util helpers ----------
+
+// make a stable key (sku preferred, else handle)
 function makeKey(item) {
   const url = item.url || "";
   const handle = (url.match(/\/products\/([^/?#]+)/i) || [])[1] || "";
   return (item.sku || "").trim() || handle;
 }
 
-// util: dedupe by key (last write wins)
+// dedupe by key (last write wins)
 function dedupeByKey(items) {
   const m = new Map();
   for (const it of items) m.set(makeKey(it), it);
   return Array.from(m.values());
 }
 
-// util: chunk an array
+// chunk an array
 function chunk(arr, n) {
   if (arr.length <= n) return [arr];
   const out = [];
@@ -77,13 +83,12 @@ function normaliseVendorForSolutiontech(prod) {
     skuLow.startsWith("eb") ||
     skuLow.startsWith("ls");
 
-  // NEW: Dtech detection
+  // Dtech detection
   const isDtech =
     t.includes("dtech") ||
-    skuLow.startsWith("dtuf") ||   // e.g. DTUF303FIBUSBXX
-    skuLow.startsWith("dtf");      // safety net for similar patterns
+    skuLow.startsWith("dtuf") || // e.g. DTUF303FIBUSBXX
+    skuLow.startsWith("dtf");    // safety net for similar patterns
 
-  // Strong patterns win over whatever the page/extractor said
   if (isJK) {
     vendor = "JK";
   } else if (isEpson) {
@@ -141,33 +146,116 @@ async function sendBatchesForCollection(items, collectionIndex, collectionUrl) {
   }
 }
 
-async function autoScrollCollection(page, { maxScrolls = 15, pauseMs = 1200 } = {}) {
-  // Start height
-  let previousHeight = await page.evaluate(() => document.body.scrollHeight);
+// ---------- collection loading helpers ----------
 
-  for (let i = 0; i < maxScrolls; i++) {
-    // Scroll to bottom
-    await page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight);
+// For “Items per page: 24” style controls – set to max value
+async function setItemsPerPageToMax(page) {
+  try {
+    const result = await page.evaluate(() => {
+      const selects = Array.from(document.querySelectorAll("select"));
+      let target = null;
+
+      for (const sel of selects) {
+        let labelText = "";
+
+        // direct label[for=id]
+        if (sel.id) {
+          const lbl = document.querySelector(`label[for="${sel.id}"]`);
+          if (lbl) labelText += " " + (lbl.textContent || "");
+        }
+
+        // parent text often contains the label (e.g. "Items per page 24 ▼")
+        if (sel.parentElement) {
+          labelText += " " + (sel.parentElement.textContent || "");
+        }
+
+        // previous sibling might be a label span
+        if (sel.previousElementSibling) {
+          labelText += " " + (sel.previousElementSibling.textContent || "");
+        }
+
+        if (/items\s*per\s*page/i.test(labelText)) {
+          target = sel;
+          break;
+        }
+      }
+
+      if (!target) {
+        return { found: false };
+      }
+
+      const options = Array.from(target.options || []);
+      if (!options.length) return { found: false };
+
+      // take the last option as "max"
+      const last = options[options.length - 1];
+      target.value = last.value;
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+
+      return {
+        found: true,
+        value: last.value,
+        text: last.textContent || "",
+      };
     });
 
-    // Give the site time to fetch & render more products
-    await page.waitForTimeout(pauseMs);
-
-    const newHeight = await page.evaluate(() => document.body.scrollHeight);
-
-    // If height hasn't increased, assume no more products were loaded
-    if (newHeight <= previousHeight) {
-      break;
+    if (!result || !result.found) {
+      console.log("  [items-per-page] dropdown not found or has no options");
+      return;
     }
 
-    previousHeight = newHeight;
+    console.log(
+      `  [items-per-page] set to max option value=${result.value} (${result.text.trim()})`
+    );
+
+    // wait for Ajax reload of product grid
+    await page.waitForLoadState("networkidle").catch(() => {});
+    await page.waitForTimeout(1500);
+  } catch (err) {
+    console.log(
+      "  [items-per-page] failed to change items-per-page dropdown:",
+      err.message
+    );
   }
 }
 
+// Fallback for true infinite scroll (if any collections use it)
+async function autoScrollCollection(page, { maxScrolls = 15, pauseMs = 1200 } = {}) {
+  try {
+    let previousHeight = await page.evaluate(
+      () => document.body.scrollHeight
+    );
+
+    for (let i = 0; i < maxScrolls; i++) {
+      await page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight);
+      });
+
+      await page.waitForTimeout(pauseMs);
+
+      const newHeight = await page.evaluate(
+        () => document.body.scrollHeight
+      );
+
+      if (newHeight <= previousHeight) {
+        break;
+      }
+
+      previousHeight = newHeight;
+    }
+  } catch (err) {
+    console.log(
+      "  [scroll] autoScrollCollection error:",
+      err.message
+    );
+  }
+}
+
+// ---------- main ----------
+
 async function main() {
   console.log(`[init] startUrls (${startUrls.length}):`);
-  startUrls.forEach(u => console.log(`  - ${u}`));
+  startUrls.forEach((u) => console.log(`  - ${u}`));
 
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext();
@@ -198,23 +286,25 @@ async function main() {
       totalPages++;
       console.log(`[collection ${idx + 1}] page ${pages}: ${url}`);
 
-await page.goto(url, {
-  waitUntil: "domcontentloaded",
-  timeout: 120000,
-});
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 120000,
+      });
 
-// NEW: scroll to bottom to force infinite-scroll pages (like Dtech) to load
-await autoScrollCollection(page);
+      // First, try to bump "Items per page" to max (Dtech & similar)
+      await setItemsPerPageToMax(page);
 
-const links = await getProductLinksOnPage(page);
-console.log(
-  `[collection ${idx + 1}] page ${pages}: found ${links.length} links`
-);
+      // Then, scroll in case any collection uses infinite scroll
+      await autoScrollCollection(page);
 
+      const links = await getProductLinksOnPage(page);
+      console.log(
+        `[collection ${idx + 1}] page ${pages}: found ${links.length} links`
+      );
 
       // Scrape products concurrently for this collection
       await Promise.all(
-        links.map(href =>
+        links.map((href) =>
           limit(async () => {
             const p = await ctx.newPage();
             try {
@@ -222,8 +312,10 @@ console.log(
                 waitUntil: "domcontentloaded",
                 timeout: 120000,
               });
+
               const prodRaw = await extractProduct(p);
               const prod = normaliseVendorForSolutiontech(prodRaw);
+
               const full = {
                 source: "solutiontech",
                 crawledAt: new Date().toISOString(),
@@ -256,7 +348,7 @@ console.log(
         )
       );
 
-      // next page for this collection
+      // next page for this collection (for classic ?page=2 pagination)
       const nextUrl = await getNextPageUrl(page);
       if (!nextUrl) {
         console.log(
@@ -277,10 +369,11 @@ console.log(
   console.log(
     `Done. Collections: ${startUrls.length}, Pages: ${totalPages}, Products scraped (unique keys): ${totalItems}`
   );
+
   await browser.close();
 }
 
-main().catch(e => {
+main().catch((e) => {
   console.error("Fatal:", e);
   process.exit(2);
 });
