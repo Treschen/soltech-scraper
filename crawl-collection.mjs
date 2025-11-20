@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { chromium } from "playwright";
 import pLimit from "p-limit";
+import fs from "fs";
 import { loginIfNeeded } from "./lib/login.mjs";
 import { extractProduct } from "./lib/extract-product.mjs";
 import {
@@ -329,10 +330,17 @@ async function main() {
         timeout: 120000,
       });
 
+      //await page.screenshot({ path: "debug-page.png", fullPage: true });
+      //const html = await page.content();
+      //require("fs").writeFileSync("debug-page.html", html);
+      //console.log("  [debug] saved debug-page.html");
       await page.screenshot({ path: "debug-page.png", fullPage: true });
+
       const html = await page.content();
-      require("fs").writeFileSync("debug-page.html", html);
-      console.log("  [debug] saved debug-page.html");
+      await fs.promises.writeFile("debug-page.html", html, "utf8");
+
+      console.log("  [debug] saved debug-page.html and debug-page.png");
+
 
       // Dtech & similar: try bumping items-per-page
       await setItemsPerPageToMax(page);
