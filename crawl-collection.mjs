@@ -58,7 +58,7 @@ function chunk(arr, n) {
   return out;
 }
 
-// Normalise vendor for Solution Technologies (Epson vs JK etc.)
+// Normalise vendor for Solution Technologies (Epson vs JK vs Dtech etc.)
 function normaliseVendorForSolutiontech(prod) {
   const title = prod.title || "";
   const sku = prod.sku || "";
@@ -77,11 +77,19 @@ function normaliseVendorForSolutiontech(prod) {
     skuLow.startsWith("eb") ||
     skuLow.startsWith("ls");
 
+  // NEW: Dtech detection
+  const isDtech =
+    t.includes("dtech") ||
+    skuLow.startsWith("dtuf") ||   // e.g. DTUF303FIBUSBXX
+    skuLow.startsWith("dtf");      // safety net for similar patterns
+
   // Strong patterns win over whatever the page/extractor said
   if (isJK) {
     vendor = "JK";
   } else if (isEpson) {
     vendor = "Epson";
+  } else if (isDtech) {
+    vendor = "Dtech";
   }
 
   return { ...prod, vendor };
