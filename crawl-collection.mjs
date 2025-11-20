@@ -329,6 +329,11 @@ async function main() {
         timeout: 120000,
       });
 
+      await page.screenshot({ path: "debug-page.png", fullPage: true });
+      const html = await page.content();
+      require("fs").writeFileSync("debug-page.html", html);
+      console.log("  [debug] saved debug-page.html");
+
       // Dtech & similar: try bumping items-per-page
       await setItemsPerPageToMax(page);
 
