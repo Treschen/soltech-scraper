@@ -141,6 +141,30 @@ async function sendBatchesForCollection(items, collectionIndex, collectionUrl) {
   }
 }
 
+async function autoScrollCollection(page, { maxScrolls = 15, pauseMs = 1200 } = {}) {
+  // Start height
+  let previousHeight = await page.evaluate(() => document.body.scrollHeight);
+
+  for (let i = 0; i < maxScrolls; i++) {
+    // Scroll to bottom
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight);
+    });
+
+    // Give the site time to fetch & render more products
+    await page.waitForTimeout(pauseMs);
+
+    const newHeight = await page.evaluate(() => document.body.scrollHeight);
+
+    // If height hasn't increased, assume no more products were loaded
+    if (newHeight <= previousHeight) {
+      break;
+    }
+
+    previousHeight = newHeight;
+  }
+}
+
 async function main() {
   console.log(`[init] startUrls (${startUrls.length}):`);
   startUrls.forEach(u => console.log(`  - ${u}`));
@@ -174,15 +198,19 @@ async function main() {
       totalPages++;
       console.log(`[collection ${idx + 1}] page ${pages}: ${url}`);
 
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 120000,
-      });
+await page.goto(url, {
+  waitUntil: "domcontentloaded",
+  timeout: 120000,
+});
 
-      const links = await getProductLinksOnPage(page);
-      console.log(
-        `[collection ${idx + 1}] page ${pages}: found ${links.length} links`
-      );
+// NEW: scroll to bottom to force infinite-scroll pages (like Dtech) to load
+await autoScrollCollection(page);
+
+const links = await getProductLinksOnPage(page);
+console.log(
+  `[collection ${idx + 1}] page ${pages}: found ${links.length} links`
+);
+
 
       // Scrape products concurrently for this collection
       await Promise.all(
