@@ -12,17 +12,58 @@ const {
   DEALER_PASSWORD,
   PRODUCT_URL,
   N8N_WEBHOOK_URL,
+  DRY_RUN = "false",
 } = process.env;
 
-if (!PRODUCT_URL) throw new Error("Missing env: PRODUCT_URL");
-if (!N8N_WEBHOOK_URL) throw new Error("Missing env: N8N_WEBHOOK_URL");
+if (!SUPPLIER_BASE) throw new Error("Missing env SUPPLIER_BASE");
+if (!DEALER_EMAIL) throw new Error("Missing env DEALER_EMAIL");
+if (!DEALER_PASSWORD) throw new Error("Missing env DEALER_PASSWORD");
+if (!PRODUCT_URL) throw new Error("Missing env PRODUCT_URL");
+if (!N8N_WEBHOOK_URL && DRY_RUN !== "true") {
+  throw new Error("Missing env N8N_WEBHOOK_URL");
+}
+
+// --- Vendor normaliser for Solution Technologies (Epson / JK / Dtech) ----
+function normaliseVendorForSolutiontech(prod) {
+  const title = prod.title || "";
+  const sku = prod.sku || "";
+  let vendor = (prod.vendor || "").trim();
+
+  const t = title.toLowerCase();
+  const skuLow = sku.toLowerCase();
+
+  const isJK =
+    skuLow.startsWith("jk") ||
+    t.startsWith("jk ");
+
+  const isEpson =
+    t.includes("epson") ||
+    skuLow.startsWith("eh") ||
+    skuLow.startsWith("eb") ||
+    skuLow.startsWith("ls");
+
+  const isDtech =
+    t.includes("dtech") ||
+    skuLow.startsWith("dtuf") || // e.g. DTUF303FIBUSBXX
+    skuLow.startsWith("dtf");
+
+  if (isJK) {
+    vendor = "JK";
+  } else if (isEpson) {
+    vendor = "Epson";
+  } else if (isDtech) {
+    vendor = "Dtech";
+  }
+
+  return { ...prod, vendor };
+}
 
 async function main() {
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
 
-  // 1) Login (session persisted via .auth if you kept that in Docker)
+  // 1) Login
   await loginIfNeeded(page, {
     base: SUPPLIER_BASE,
     email: DEALER_EMAIL,
@@ -31,34 +72,50 @@ async function main() {
 
   // 2) Go to the target product
   console.log("[single] navigating:", PRODUCT_URL);
-  await page.goto(PRODUCT_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
+  await page.goto(PRODUCT_URL, {
+    waitUntil: "domcontentloaded",
+    timeout: 120000,
+  });
 
-  // 3) Extract (uses DOM + product.js fallback) -> { title, vendor, sku, price(number), ... }
+  // 3) Extract raw product data from the page
   const raw = await extractProduct(page);
 
-  // 4) Canonicalize for Shopify upsert -> { sku, price:"123.45", quantity, handle, ... }
-  const item = buildCanonicalItem(raw);
+  // 4) Normalise vendor (JK / Epson / Dtech) and ensure URL present
+  const enriched = normaliseVendorForSolutiontech({
+    ...raw,
+    url: raw.url || PRODUCT_URL,
+  });
 
-  // sanity checks
-  if (!item.sku) throw new Error("Extracted product has no SKU (cannot upsert)");
-  if (!(Number(item.price) > 0)) throw new Error("Extracted product price is zero/invalid");
+  // 5) Build canonical item for ingest
+  const item = buildCanonicalItem(enriched);
 
-  // 5) POST to n8n (send as a batch of one for consistency)
+  console.log("[single] canonical item:", JSON.stringify(item, null, 2));
+
+  if (DRY_RUN === "true") {
+    console.log("[DRY_RUN] Skipping POST to n8n.");
+    await browser.close();
+    return;
+  }
+
+  // 6) Wrap in payload and POST to n8n
   const payload = {
     source: "solutiontech",
-    batchId: `single-${Date.now()}`,
-    vendor: item.vendor || "Epson",
+    crawledAt: new Date().toISOString(),
+    count: 1,
     items: [item],
   };
 
-  console.log("→ Posting to n8n:", process.env.N8N_WEBHOOK_URL);
-  await postJsonWithRetry(N8N_WEBHOOK_URL, payload, { retries: 5, baseDelayMs: 500 });
+  console.log("→ Posting to n8n:", N8N_WEBHOOK_URL);
+  await postJsonWithRetry(N8N_WEBHOOK_URL, payload, {
+    retries: 5,
+    baseDelayMs: 500,
+  });
   console.log("✔ posted:", item.title || item.sku, "@", item.price);
 
   await browser.close();
 }
 
-main().catch(async (e) => {
+main().catch((e) => {
   console.error("Fatal:", e?.message || e);
   process.exit(2);
 });
