@@ -208,7 +208,7 @@ async function main() {
 
               const key = makeKey(full);
               if (globalSeenKeys.has(key)) {
-                console.log(`  ◦ duplicate key, skipping: ${key}`);
+                //console.log(`  ◦ duplicate key, skipping: ${key}`);
               } else {
                 globalSeenKeys.add(key);
                 collectedForSet.push(full);
