@@ -19,7 +19,7 @@ const {
   COLLECTION_URLS,
   N8N_WEBHOOK_URL,
   MAX_PAGES = "10",
-  CONCURRENCY = "5",
+  CONCURRENCY = "10",
   BATCH_SIZE = "50",
   DRY_RUN = "false",
 } = process.env;
