@@ -176,6 +176,8 @@ async function main() {
       // Only on FIRST page: force items-per-page = max (50)
       if (pages === 1) {
         await setItemsPerPageToMax(page);
+        await page.waitForSelector('a[href*="/products/"]', { timeout: 15000 })
+          .catch(() => {});
       }
 
       const links = await getProductLinksOnPage(page);
