@@ -44,7 +44,7 @@ const batchSize = Math.max(1, parseInt(BATCH_SIZE, 10) || 50);
 function makeKey(item) {
   const url = item.url || "";
   const handle = (url.match(/\/products\/([^/?#]+)/i) || [])[1] || "";
-  return (item.sku || "").trim() || handle;
+  return handle;   // ALWAYS use handle — ignore SKU for dedupe
 }
 
 // util: dedupe by key (last write wins)
