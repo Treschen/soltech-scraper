@@ -1,14 +1,14 @@
 // crawl-collection.mjs
+// Scrape one or more Solution Technologies collection URLs and send to n8n
+
 import "dotenv/config";
+import fs from "fs";
 import { chromium } from "playwright";
 import pLimit from "p-limit";
-import fs from "fs";
+
 import { loginIfNeeded } from "./lib/login.mjs";
 import { extractProduct } from "./lib/extract-product.mjs";
-import {
-  getProductLinksOnPage,
-  getNextPageUrl,
-} from "./lib/pagination.mjs";
+import { getProductLinksOnPage, getNextPageUrl } from "./lib/pagination.mjs";
 import { postJsonWithRetry } from "./lib/fetch-retry.mjs";
 
 const {
@@ -26,7 +26,7 @@ const {
 
 const startUrls = (COLLECTION_URLS || COLLECTION_URL || "")
   .split(",")
-  .map((u) => u.trim())
+  .map(u => u.trim())
   .filter(Boolean);
 
 if (!startUrls.length) {
@@ -41,7 +41,7 @@ const maxPages = parseInt(MAX_PAGES, 10);
 const limit = pLimit(parseInt(CONCURRENCY, 10));
 const batchSize = Math.max(1, parseInt(BATCH_SIZE, 10) || 50);
 
-// ---------- util helpers ----------
+// ---------- helpers ----------
 
 // make a stable key (sku preferred, else handle)
 function makeKey(item) {
@@ -87,8 +87,8 @@ function normaliseVendorForSolutiontech(prod) {
   // Dtech detection
   const isDtech =
     t.includes("dtech") ||
-    skuLow.startsWith("dtuf") || // e.g. DTUF303FIBUSBXX
-    skuLow.startsWith("dtf");    // safety net for similar patterns
+    skuLow.startsWith("dtuf") ||
+    skuLow.startsWith("dtf");
 
   if (isJK) {
     vendor = "JK";
@@ -101,6 +101,52 @@ function normaliseVendorForSolutiontech(prod) {
   return { ...prod, vendor };
 }
 
+// Scroll a bit in case anything lazy-loads on scroll
+async function autoScrollCollection(page, { maxScrolls = 10, pauseMs = 800 } = {}) {
+  let previousHeight = await page.evaluate(() => document.body.scrollHeight);
+
+  for (let i = 0; i < maxScrolls; i++) {
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(pauseMs);
+
+    const newHeight = await page.evaluate(() => document.body.scrollHeight);
+    if (newHeight <= previousHeight) break;
+    previousHeight = newHeight;
+  }
+}
+
+// Dtech / infinite-scroll style: find the hidden “Show more” button
+async function getInfiniteScrollNextUrl(page) {
+  const rel = await page.evaluate(() => {
+    const btn = document.querySelector(".infinite-scrolling a.btn");
+    if (!btn) return null;
+    return btn.getAttribute("data-href") || btn.getAttribute("href");
+  });
+
+  if (!rel) return null;
+
+  // Build absolute URL using SUPPLIER_BASE as origin
+  try {
+    const base = SUPPLIER_BASE || (await page.evaluate(() => location.origin));
+    return new URL(rel, base).toString();
+  } catch {
+    return rel;
+  }
+}
+
+// Dump HTML + screenshot for debugging (already working for you)
+async function dumpDebug(page) {
+  try {
+    await page.screenshot({ path: "debug-page.png", fullPage: true });
+    const html = await page.content();
+    await fs.promises.writeFile("debug-page.html", html, "utf8");
+    console.log("[debug] saved debug-page.html and debug-page.png");
+  } catch (e) {
+    console.warn("[debug] failed to save debug artifacts:", e.message);
+  }
+}
+
+// Send per-collection batches to n8n
 async function sendBatchesForCollection(items, collectionIndex, collectionUrl) {
   if (!items.length) {
     console.log(
@@ -147,154 +193,11 @@ async function sendBatchesForCollection(items, collectionIndex, collectionUrl) {
   }
 }
 
-// ---------- collection loading helpers ----------
-
-// Try to bump “Items per page” dropdown to its max value
-async function setItemsPerPageToMax(page) {
-  try {
-    const result = await page.evaluate(() => {
-      const selects = Array.from(document.querySelectorAll("select"));
-      let target = null;
-
-      for (const sel of selects) {
-        let labelText = "";
-
-        if (sel.id) {
-          const lbl = document.querySelector(`label[for="${sel.id}"]`);
-          if (lbl) labelText += " " + (lbl.textContent || "");
-        }
-
-        if (sel.parentElement) {
-          labelText += " " + (sel.parentElement.textContent || "");
-        }
-
-        if (sel.previousElementSibling) {
-          labelText += " " + (sel.previousElementSibling.textContent || "");
-        }
-
-        if (/items\s*per\s*page/i.test(labelText)) {
-          target = sel;
-          break;
-        }
-      }
-
-      if (!target) {
-        return { found: false };
-      }
-
-      const options = Array.from(target.options || []);
-      if (!options.length) return { found: false };
-
-      const last = options[options.length - 1];
-      target.value = last.value;
-      target.dispatchEvent(new Event("change", { bubbles: true }));
-
-      return {
-        found: true,
-        value: last.value,
-        text: last.textContent || "",
-      };
-    });
-
-    if (!result || !result.found) {
-      console.log("  [items-per-page] dropdown not found or has no options");
-      return;
-    }
-
-    console.log(
-      `  [items-per-page] set to max option value=${result.value} (${result.text.trim()})`
-    );
-
-    await page.waitForLoadState("networkidle").catch(() => {});
-    await page.waitForTimeout(1500);
-  } catch (err) {
-    console.log(
-      "  [items-per-page] failed to change items-per-page dropdown:",
-      err.message
-    );
-  }
-}
-
-// Drive RapidSearch / resultpage.js to load all additional items if possible
-async function rapidSearchLoadAll(page) {
-  try {
-    // 1) Click any visible “load more” style button a few times
-    for (let i = 0; i < 10; i++) {
-      const loadMore = await page.$(
-        'button[class*="load"],a[class*="load"],.rs-load-more'
-      );
-      if (!loadMore) break;
-
-      console.log(`  [rapidsearch] Clicking Load More (${i + 1})`);
-      await loadMore.click().catch(() => {});
-      await page.waitForLoadState("networkidle").catch(() => {});
-      await page.waitForTimeout(1500);
-    }
-
-    // 2) Try JS API if the app exposes something usable
-    await page.evaluate(async () => {
-      const rs = window.RapidSearch || window.RapidSearchResult || null;
-      if (!rs) return;
-
-      // very defensive: only call if clearly a function
-      const fn =
-        rs.loadMore ||
-        (rs.resultPage && rs.resultPage.loadMore) ||
-        null;
-
-      if (typeof fn === "function") {
-        for (let i = 0; i < 10; i++) {
-          try {
-            await fn.call(rs);
-          } catch (e) {
-            break;
-          }
-          await new Promise((r) => setTimeout(r, 1500));
-        }
-      }
-    });
-  } catch (err) {
-    console.log("  [rapidsearch] error:", err.message);
-  }
-}
-
-// Fallback for true infinite scroll (if any collections use it)
-async function autoScrollCollection(page, { maxScrolls = 15, pauseMs = 1200 } = {}) {
-  try {
-    let previousHeight = await page.evaluate(
-      () => document.body.scrollHeight
-    );
-
-    for (let i = 0; i < maxScrolls; i++) {
-      await page.evaluate(() => {
-        window.scrollTo(0, document.body.scrollHeight);
-      });
-
-      await page.waitForTimeout(pauseMs);
-
-      const newHeight = await page.evaluate(
-        () => document.body.scrollHeight
-      );
-
-      if (newHeight <= previousHeight) {
-        break;
-      }
-
-      previousHeight = newHeight;
-    }
-  } catch (err) {
-    console.log(
-      "  [scroll] autoScrollCollection error:",
-      err.message
-    );
-  }
-}
-
 // ---------- main ----------
 
 async function main() {
   console.log(`[init] startUrls (${startUrls.length}):`);
-  startUrls.forEach((u) => console.log(`  - ${u}`));
+  startUrls.forEach(u => console.log(`  - ${u}`));
 
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext();
@@ -309,7 +212,7 @@ async function main() {
   let totalPages = 0;
   let totalItems = 0;
 
-  // track global uniqueness across ALL collections
+  // global uniqueness across all collections
   const globalSeenKeys = new Set();
 
   for (let idx = 0; idx < startUrls.length; idx++) {
@@ -318,7 +221,7 @@ async function main() {
 
     let url = startUrl;
     let pages = 0;
-    const collectedForSet = []; // items for this collection only
+    const collectedForSet = [];
 
     while (url && pages < maxPages) {
       pages++;
@@ -330,25 +233,10 @@ async function main() {
         timeout: 120000,
       });
 
-      //await page.screenshot({ path: "debug-page.png", fullPage: true });
-      //const html = await page.content();
-      //require("fs").writeFileSync("debug-page.html", html);
-      //console.log("  [debug] saved debug-page.html");
-      await page.screenshot({ path: "debug-page.png", fullPage: true });
+      // Optional debug dump (already used once – keep commented in normal runs)
+      // await dumpDebug(page);
 
-      const html = await page.content();
-      await fs.promises.writeFile("debug-page.html", html, "utf8");
-
-      console.log("  [debug] saved debug-page.html and debug-page.png");
-
-
-      // Dtech & similar: try bumping items-per-page
-      await setItemsPerPageToMax(page);
-
-      // RapidSearch resultpage.js integration: try to load all extra items
-      await rapidSearchLoadAll(page);
-
-      // Extra safety: scroll in case anything is tied to scroll events
+      // Light scroll to trigger any lazy loading
       await autoScrollCollection(page);
 
       const links = await getProductLinksOnPage(page);
@@ -358,7 +246,7 @@ async function main() {
 
       // Scrape products concurrently for this collection
       await Promise.all(
-        links.map((href) =>
+        links.map(href =>
           limit(async () => {
             const p = await ctx.newPage();
             try {
@@ -366,10 +254,8 @@ async function main() {
                 waitUntil: "domcontentloaded",
                 timeout: 120000,
               });
-
               const prodRaw = await extractProduct(p);
               const prod = normaliseVendorForSolutiontech(prodRaw);
-
               const full = {
                 source: "solutiontech",
                 crawledAt: new Date().toISOString(),
@@ -389,12 +275,14 @@ async function main() {
               }
             } catch (e) {
               console.error(`  ✖ scrape failed ${href}:`, e.message);
-              await p
-                .screenshot({
+              try {
+                await p.screenshot({
                   path: `error-${Date.now()}.png`,
                   fullPage: true,
-                })
-                .catch(() => {});
+                });
+              } catch {
+                /* ignore */
+              }
             } finally {
               await p.close();
             }
@@ -402,14 +290,24 @@ async function main() {
         )
       );
 
-      // next page for classic ?page=2 style pagination
-      const nextUrl = await getNextPageUrl(page);
+      // ---------- NEXT PAGE LOGIC ----------
+
+      // 1) Dtech style “infinite_scrolling” hidden button
+      let nextUrl = await getInfiniteScrollNextUrl(page);
+
+      // 2) Fallback to generic pagination helper for other collections
+      if (!nextUrl) {
+        nextUrl = await getNextPageUrl(page);
+      }
+
       if (!nextUrl) {
         console.log(
           `[collection ${idx + 1}] no further page link found; stopping pagination.`
         );
+        url = null;
+      } else {
+        url = nextUrl;
       }
-      url = nextUrl;
     }
 
     console.log(
@@ -422,11 +320,10 @@ async function main() {
   console.log(
     `Done. Collections: ${startUrls.length}, Pages: ${totalPages}, Products scraped (unique keys): ${totalItems}`
   );
-
   await browser.close();
 }
 
-main().catch((e) => {
+main().catch(e => {
   console.error("Fatal:", e);
   process.exit(2);
 });
